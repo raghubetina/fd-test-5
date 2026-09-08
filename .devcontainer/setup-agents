@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+devcontainer_dir="$(cd "$(dirname "$0")" && pwd)"
+repository_root="$(cd "$devcontainer_dir/.." && pwd)"
+cd "$repository_root"
+
+# shellcheck disable=SC1091
+source "$devcontainer_dir/agent-versions.env"
+
+if [[ "$(id -u)" == "0" ]]; then
+  echo "Agent setup must run as the non-root devcontainer user." >&2
+  exit 1
+fi
+
+export NPM_CONFIG_CACHE="${NPM_CONFIG_CACHE:-$HOME/.cache/npm}"
+shared_path_prefix="$repository_root/bin:$HOME/.local/bin:"
+container_path="$PATH"
+while [[ "$container_path" == "$shared_path_prefix"* ]]; do
+  container_path="${container_path#"$shared_path_prefix"}"
+done
+export PATH="$shared_path_prefix$container_path"
+
+if [[ -x /usr/sbin/sshd && -f /etc/environment ]]; then
+  environment_snapshot="$(mktemp)"
+  SHARED_PATH="$PATH" node -e '
+    const fs = require("node:fs");
+    const source = fs.readFileSync("/etc/environment", "utf8");
+    const pathLine = `PATH=${JSON.stringify(process.env.SHARED_PATH)}`;
+    const lines = source.split("\n").filter((line) => !line.startsWith("PATH="));
+    lines.splice(lines.at(-1) === "" ? -1 : lines.length, 0, pathLine);
+    process.stdout.write(lines.join("\n"));
+  ' >"$environment_snapshot"
+  sudo install -o root -g root -m 0644 "$environment_snapshot" /etc/environment
+  rm "$environment_snapshot"
+fi
+
+skills_cache_root="$HOME/.cache/firstdraft/skills"
+claude_skills_root="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"
+codex_skills_root="$HOME/.agents/skills"
+mkdir -p \
+  "$claude_skills_root" \
+  "$codex_skills_root" \
+  "$skills_cache_root" \
+  "$NPM_CONFIG_CACHE" \
+  "$HOME/.local"
+
+firstdraft_environment="$repository_root/.env"
+if [[ ! -e "$firstdraft_environment" && ! -L "$firstdraft_environment" ]]; then
+  install -m 600 "$repository_root/.env.example" "$firstdraft_environment"
+fi
+if [[ -L "$firstdraft_environment" || ! -f "$firstdraft_environment" || \
+  ! -O "$firstdraft_environment" ]]; then
+  echo ".env must be a regular file owned by the devcontainer user." >&2
+  exit 1
+fi
+
+if firstdraft_environment_mode="$(stat -c '%a' "$firstdraft_environment" 2>/dev/null)"; then
+  :
+elif firstdraft_environment_mode="$(stat -f '%Lp' "$firstdraft_environment" 2>/dev/null)"; then
+  :
+else
+  echo "Could not inspect .env permissions." >&2
+  exit 1
+fi
+if [[ "$firstdraft_environment_mode" != "600" ]]; then
+  echo ".env must have mode 0600; run: chmod 600 .env" >&2
+  exit 1
+fi
+
+npm install --global --prefix "$HOME/.local" \
+  "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION" \
+  "@firstdraft.com/cli@$FIRSTDRAFT_CLI_VERSION" \
+  "@openai/codex@$CODEX_VERSION"
+
+skills_checkout="$skills_cache_root/$FIRSTDRAFT_SKILLS_REVISION"
+skill_source="$skills_checkout/skills/create-full-stack-app"
+
+if [[ ! -d "$skills_checkout/.git" ]]; then
+  if [[ -e "$skills_checkout" ]]; then
+    echo "Incomplete First Draft Skill cache at $skills_checkout; preserve it for inspection." >&2
+    exit 1
+  fi
+
+  temporary_checkout="$(mktemp -d "$skills_cache_root/.checkout.XXXXXX")"
+  git -C "$temporary_checkout" init --quiet
+  git -C "$temporary_checkout" remote add origin https://github.com/firstdraft/skills.git
+  git -C "$temporary_checkout" fetch --quiet --depth=1 origin "$FIRSTDRAFT_SKILLS_REVISION"
+  git -C "$temporary_checkout" checkout --quiet --detach FETCH_HEAD
+  mv "$temporary_checkout" "$skills_checkout"
+fi
+
+if [[ "$(git -C "$skills_checkout" rev-parse HEAD)" != "$FIRSTDRAFT_SKILLS_REVISION" ]]; then
+  echo "First Draft Skill cache revision does not match the configured revision." >&2
+  exit 1
+fi
+
+if [[ ! -r "$skill_source/SKILL.md" ]]; then
+  echo "The configured First Draft Skill is missing SKILL.md." >&2
+  exit 1
+fi
+
+# shellcheck disable=SC2016
+codex_plugin_name="$(node -e '
+  const path = require("node:path");
+  const manifest = require(path.resolve(process.argv[1], ".claude-plugin/plugin.json"));
+  process.stdout.write(`${manifest.name}:create-full-stack-app`);
+' "$skills_checkout")"
+if [[ "$codex_plugin_name" != "$FIRSTDRAFT_CODEX_SKILL_NAME" ]]; then
+  echo "The configured Codex Skill name does not match the pinned source plugin." >&2
+  exit 1
+fi
+
+for skill_link in \
+  "$claude_skills_root/$FIRSTDRAFT_CLAUDE_SKILL_NAME" \
+  "$codex_skills_root/create-full-stack-app"; do
+  if [[ -e "$skill_link" && ! -L "$skill_link" ]]; then
+    echo "$skill_link already exists and is not a managed symlink; preserving it." >&2
+    exit 1
+  fi
+  ln -sfn "$skill_source" "$skill_link"
+done
+
+claude --version
+codex --version
+firstdraft --version
+
+printf '\nDrawing Board setup complete.\n'
+printf 'Next: paste your staging First Draft token into the `FIRSTDRAFT_API_TOKEN` entry in `.env`.\n'
+printf 'Then run `claude` or `codex` and describe the app you want.\n'
+printf 'The internal-alpha path is `--output .`: approve moving this Drawing Board into `design/`, then continue in the app at the root.\n'
+printf 'Keep the same Git repository; never run the nested application initializer after root adoption.\n'
+printf 'Ask explicitly for a private GitHub repository if you want the separate Publication mode.\n'

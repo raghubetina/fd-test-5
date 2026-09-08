@@ -1,0 +1,39 @@
+{
+  "name": "First Draft Drawing Board",
+  "dockerComposeFile": "compose.yaml",
+  "service": "rails-app",
+  "runServices": ["rails-app", "postgres"],
+  "workspaceFolder": "/workspaces/drawing-board",
+  "shutdownAction": "stopCompose",
+  "containerEnv": {
+    "CAPYBARA_SERVER_HOST": "rails-app",
+    "CAPYBARA_SERVER_PORT": "45678",
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
+    "CODEX_HOME": "/home/vscode/.codex",
+    "DB_HOST": "postgres",
+    "DISABLE_AUTOUPDATER": "1",
+    "NPM_CONFIG_CACHE": "/home/vscode/.cache/npm",
+    "SELENIUM_HOST": "selenium"
+  },
+  "remoteEnv": {
+    "PATH": "${containerWorkspaceFolder}/bin:/home/vscode/.local/bin:${containerEnv:PATH}"
+  },
+  "mounts": [
+    "source=firstdraft-drawing-board-claude-${devcontainerId},target=/home/vscode/.claude,type=volume",
+    "source=firstdraft-drawing-board-codex-${devcontainerId},target=/home/vscode/.codex,type=volume",
+    "source=firstdraft-drawing-board-cache-${devcontainerId},target=/home/vscode/.cache,type=volume"
+  ],
+  "forwardPorts": [3000, 5432],
+  "customizations": {
+    "vscode": {
+      "extensions": ["Shopify.ruby-lsp", "bradlc.vscode-tailwindcss"],
+      "settings": {
+        "extensions.supportNodeGlobalNavigator": true
+      }
+    }
+  },
+  "remoteUser": "vscode",
+  "onCreateCommand": "sudo chown -R vscode:vscode /home/vscode/.claude /home/vscode/.codex /home/vscode/.cache",
+  "postCreateCommand": ".devcontainer/setup-agents",
+  "postAttachCommand": "if [ -x script/refresh-codespaces-private-port ]; then exec script/refresh-codespaces-private-port; else exec design/script/refresh-codespaces-private-port; fi"
+}

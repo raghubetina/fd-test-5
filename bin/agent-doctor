@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+set -u
+
+repository_root="$(cd "$(dirname "$0")/.." && pwd)" || exit 1
+cd "$repository_root" || exit 1
+
+installation_only=false
+case "${1:-}" in
+  "") ;;
+  --installation-only) installation_only=true ;;
+  *)
+    echo "Usage: bin/agent-doctor [--installation-only]" >&2
+    exit 2
+    ;;
+esac
+
+versions_file="$repository_root/.devcontainer/agent-versions.env"
+if [[ ! -r "$versions_file" ]]; then
+  echo "Agent version contract is missing: $versions_file" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "$versions_file"
+
+status=0
+
+check_version() {
+  local label="$1"
+  local expected="$2"
+  shift 2
+
+  local output
+  if output="$("$@" 2>&1)"; then
+    local normalized_output
+    normalized_output="$(printf '%s' "$output" | tr '[:space:]' ' ' | tr -s ' ')"
+    if [[ " $normalized_output " == *" $expected "* ]]; then
+      printf '%-24s %s\n' "$label" "$output"
+    else
+      printf '%-24s version mismatch: expected %s, found %s\n' "$label" "$expected" "$output"
+      status=1
+    fi
+  else
+    local normalized_output
+    normalized_output="$(printf '%s' "$output" | tr '[:space:]' ' ' | tr -s ' ')"
+    printf '%-24s unavailable%s\n' \
+      "$label" "${normalized_output:+: $normalized_output}"
+    status=1
+  fi
+}
+
+check_workspace_cli() {
+  local expected="$repository_root/bin/firstdraft"
+  local resolved
+  resolved="$(command -v firstdraft 2>/dev/null || true)"
+  if [[ "$resolved" == "$expected" ]]; then
+    printf '%-24s %s\n' "First Draft command" "$resolved"
+  else
+    printf '%-24s expected %s, found %s\n' \
+      "First Draft command" "$expected" "${resolved:-unavailable}"
+    status=1
+  fi
+}
+
+check_shared_environment() {
+  local environment_record
+  if ! environment_record="$(node -e '
+    const {readConfiguration} = require(process.argv[1]);
+    try {
+      const configuration = readConfiguration(process.argv[2]);
+      process.stdout.write(`${configuration.apiUrl}\t${configuration.apiToken.length > 0}`);
+    } catch (error) {
+      process.stderr.write(`${error.message}\n`);
+      process.exit(1);
+    }
+  ' "$repository_root/bin/firstdraft" "$repository_root")"; then
+    printf '%-24s invalid; restore from .env.example and keep mode 0600\n' \
+      "First Draft .env"
+    status=1
+    return
+  fi
+
+  local api_url token_present
+  IFS=$'\t' read -r api_url token_present <<<"$environment_record"
+  if [[ "$api_url" == "$FIRSTDRAFT_STAGING_API_URL" ]]; then
+    printf '%-24s %s\n' "First Draft API URL" "$api_url"
+  else
+    printf '%-24s must be %s\n' \
+      "First Draft API URL" "$FIRSTDRAFT_STAGING_API_URL"
+    status=1
+  fi
+  if [[ "$token_present" == "true" ]]; then
+    printf '%-24s present (value not shown)\n' "First Draft API token"
+  else
+    printf '%-24s blank; paste the staging token into .env\n' "First Draft API token"
+    status=1
+  fi
+}
+
+check_skill() {
+  local label="$1"
+  local skill_path="$2"
+  if [[ -r "$skill_path/SKILL.md" ]] &&
+    [[ "$(git -C "$skill_path" rev-parse HEAD 2>/dev/null)" == "$FIRSTDRAFT_SKILLS_REVISION" ]]; then
+    printf '%-24s %s\n' "$label" "$FIRSTDRAFT_SKILLS_REVISION"
+  else
+    printf '%-24s missing or revision mismatch\n' "$label"
+    status=1
+  fi
+}
+
+check_version "Claude Code" "$CLAUDE_CODE_VERSION" claude --version
+check_version "Codex" "$CODEX_VERSION" codex --version
+check_version "First Draft CLI" "$FIRSTDRAFT_CLI_VERSION" \
+  "$HOME/.local/bin/firstdraft" --version
+check_workspace_cli
+check_skill \
+  "First Draft Claude Skill" \
+  "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/$FIRSTDRAFT_CLAUDE_SKILL_NAME"
+check_skill \
+  "First Draft Codex Skill" \
+  "$HOME/.agents/skills/create-full-stack-app"
+
+if [[ "$installation_only" == "true" ]]; then
+  if claude auth status --help >/dev/null 2>&1 &&
+    codex login status --help >/dev/null 2>&1 &&
+    codex login --device-auth --help >/dev/null 2>&1; then
+    printf '%-24s available\n' "Agent command contract"
+  else
+    printf '%-24s unavailable\n' "Agent command contract"
+    status=1
+  fi
+  exit "$status"
+fi
+
+check_shared_environment
+
+exit "$status"
